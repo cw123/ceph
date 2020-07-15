@@ -1,10 +1,9 @@
 #include "include/rados/librados.h"
 #include "include/rados/librados.hpp"
-#include "include/atomic.h"
 #include "include/utime.h"
 #include "common/Thread.h"
 #include "common/Clock.h"
-#include "test/librados/test.h"
+#include "test/librados/test_cxx.h"
 
 #include "gtest/gtest.h"
 #include <semaphore.h>
@@ -13,8 +12,9 @@
 #include <sstream>
 #include <iostream>
 #include <string>
+#include <atomic>
 
-#include "test/librados/TestCase.h"
+#include "test/librados/testcase_cxx.h"
 
 
 using namespace librados;
@@ -23,12 +23,12 @@ using std::ostringstream;
 using std::string;
 
 static sem_t *sem;
-static atomic_t stop_flag;
+static std::atomic<bool> stop_flag = { false };
 
 class WatchNotifyTestCtx : public WatchCtx
 {
 public:
-    void notify(uint8_t opcode, uint64_t ver, bufferlist& bl)
+    void notify(uint8_t opcode, uint64_t ver, bufferlist& bl) override
     {
       sem_post(sem);
     }
@@ -42,10 +42,10 @@ struct WatcherUnwatcher : public Thread {
   string pool;
   explicit WatcherUnwatcher(string& _pool) : pool(_pool) {}
 
-  void *entry() {
+  void *entry() override {
     Rados cluster;
     connect_cluster_pp(cluster);
-    while (!stop_flag.read()) {
+    while (!stop_flag) {
       IoCtx ioctx;
       cluster.ioctx_create(pool.c_str(), ioctx);
 
@@ -62,7 +62,7 @@ struct WatcherUnwatcher : public Thread {
 
 typedef RadosTestParamPP WatchStress;
 
-INSTANTIATE_TEST_CASE_P(WatchStressTests, WatchStress,
+INSTANTIATE_TEST_SUITE_P(WatchStressTests, WatchStress,
 			::testing::Values("", "cache"));
 
 TEST_P(WatchStress, Stress1) {
@@ -72,7 +72,6 @@ TEST_P(WatchStress, Stress1) {
   ASSERT_EQ("", create_one_pool_pp(pool_name, ncluster));
   IoCtx nioctx;
   ncluster.ioctx_create(pool_name.c_str(), nioctx);
-  WatchNotifyTestCtx ctx;
 
   WatcherUnwatcher *thr = new WatcherUnwatcher(pool_name);
   thr->create("watcher_unwatch");
@@ -113,7 +112,7 @@ TEST_P(WatchStress, Stress1) {
     ioctx.unwatch("foo", handle);
     ioctx.close();
   }
-  stop_flag.set(1);
+  stop_flag = true;
   thr->join();
   nioctx.close();
   ASSERT_EQ(0, destroy_one_pool_pp(pool_name, ncluster));

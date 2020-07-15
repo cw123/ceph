@@ -107,7 +107,8 @@ cdef extern from "rados/rgw_file.h" nogil:
 
     int rgw_lookup(rgw_fs *fs,
                    rgw_file_handle *parent_fh, const char *path,
-                   rgw_file_handle **fh, uint32_t flags)
+                   rgw_file_handle **fh, stat* st, uint32_t st_mask,
+		   uint32_t flags)
 
     int rgw_lookup_handle(rgw_fs *fs, rgw_fh_hk *fh_hk,
                           rgw_file_handle **fh, uint32_t flags)
@@ -144,7 +145,7 @@ cdef extern from "rados/rgw_file.h" nogil:
 
     int rgw_readdir(rgw_fs *fs,
                     rgw_file_handle *parent_fh, uint64_t *offset,
-                    bool (*cb)(const char *name, void *arg, uint64_t offset) nogil except? -9000,
+                    bool (*cb)(const char *name, void *arg, uint64_t offset, stat *st, uint32_t st_mask, uint32_t flags) nogil except? -9000,
                     void *cb_arg, bool *eof, uint32_t flags) except? -9000
 
     int rgw_getattr(rgw_fs *fs,
@@ -183,11 +184,21 @@ class Error(Exception):
     pass
 
 
-class PermissionError(Error):
+class OSError(Error):
+    """ `OSError` class, derived from `Error` """
+    def __init__(self, errno, strerror):
+        self.errno = errno
+        self.strerror = strerror
+
+    def __str__(self):
+        return '[Errno {0}] {1}'.format(self.errno, self.strerror)
+
+
+class PermissionError(OSError):
     pass
 
 
-class ObjectNotFound(Error):
+class ObjectNotFound(OSError):
     pass
 
 
@@ -199,7 +210,7 @@ class ObjectExists(Error):
     pass
 
 
-class IOError(Error):
+class IOError(OSError):
     pass
 
 
@@ -228,18 +239,32 @@ class WouldBlock(Error):
 class OutOfRange(Error):
     pass
 
-cdef errno_to_exception =  {
-    errno.EPERM      : PermissionError,
-    errno.ENOENT     : ObjectNotFound,
-    errno.EIO        : IOError,
-    errno.ENOSPC     : NoSpace,
-    errno.EEXIST     : ObjectExists,
-    errno.ENODATA    : NoData,
-    errno.EINVAL     : InvalidValue,
-    errno.EOPNOTSUPP : OperationNotSupported,
-    errno.ERANGE     : OutOfRange,
-    errno.EWOULDBLOCK: WouldBlock,
-}
+IF UNAME_SYSNAME == "FreeBSD":
+    cdef errno_to_exception =  {
+        errno.EPERM      : PermissionError,
+        errno.ENOENT     : ObjectNotFound,
+        errno.EIO        : IOError,
+        errno.ENOSPC     : NoSpace,
+        errno.EEXIST     : ObjectExists,
+        errno.ENOATTR    : NoData,
+        errno.EINVAL     : InvalidValue,
+        errno.EOPNOTSUPP : OperationNotSupported,
+        errno.ERANGE     : OutOfRange,
+        errno.EWOULDBLOCK: WouldBlock,
+    }
+ELSE:
+    cdef errno_to_exception =  {
+        errno.EPERM      : PermissionError,
+        errno.ENOENT     : ObjectNotFound,
+        errno.EIO        : IOError,
+        errno.ENOSPC     : NoSpace,
+        errno.EEXIST     : ObjectExists,
+        errno.ENODATA    : NoData,
+        errno.EINVAL     : InvalidValue,
+        errno.EOPNOTSUPP : OperationNotSupported,
+        errno.ERANGE     : OutOfRange,
+        errno.EWOULDBLOCK: WouldBlock,
+    }
 
 
 cdef class FileHandle(object):
@@ -285,16 +310,16 @@ cdef make_ex(ret, msg):
     """
     ret = abs(ret)
     if ret in errno_to_exception:
-        return errno_to_exception[ret](msg)
+        return errno_to_exception[ret](ret, msg)
     else:
         return Error(msg + (": error code %d" % ret))
 
 
-cdef bool readdir_cb(const char *name, void *arg, uint64_t offset) \
+cdef bool readdir_cb(const char *name, void *arg, uint64_t offset, stat *st, uint32_t st_mask, uint32_t flags) \
 except? -9000 with gil:
     if exc.PyErr_Occurred():
         return False
-    (<object>arg)(name, offset)
+    (<object>arg)(name, offset, flags)
     return True
 
 
@@ -542,10 +567,12 @@ cdef class LibRGWFS(object):
             rgw_file_handle *_file_handler
             int _flags = flags
             char* _dirname = dirname
+            stat st
+            uint32_t st_mask = 0
 
         with nogil:
             ret = rgw_lookup(self.fs, _dir_handler, _dirname,
-                             &_file_handler, _flags)
+                             &_file_handler, &st, st_mask, _flags)
         if ret < 0:
             raise make_ex(ret, "error in open '%s'" % dirname)
 
@@ -566,10 +593,12 @@ cdef class LibRGWFS(object):
             rgw_file_handle *_file_handler
             int _flags = flags
             char* _filename = filename
+            stat st
+            uint32_t st_mask = 0
 
         with nogil:
             ret = rgw_lookup(self.fs, _dir_handler, _filename,
-                             &_file_handler, _flags)
+                             &_file_handler, &st, st_mask, _flags)
         if ret < 0:
             raise make_ex(ret, "error in open '%s'" % filename)
         with nogil:

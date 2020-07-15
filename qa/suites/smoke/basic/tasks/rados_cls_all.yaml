@@ -1,3 +1,9 @@
+overrides:
+  ceph:
+    conf:
+      osd:
+        osd_class_load_list: "*"
+        osd_class_default_list: "*"
 tasks:
 - install:
 - ceph:

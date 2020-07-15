@@ -6,6 +6,8 @@ import logging
 import gevent
 from teuthology import misc as teuthology
 
+import six
+
 from teuthology.orchestra import run
 
 log = logging.getLogger(__name__)
@@ -29,6 +31,8 @@ def task(ctx, config):
           runs: <number of times to run> - the pool is remade between runs
           ec_pool: use an ec pool
           erasure_code_profile: profile to use with the erasure coded pool
+          fast_read: enable ec_pool's fast_read
+          min_size: set the min_size of created pool
           pool_snaps: use pool snapshots instead of selfmanaged snapshots
 	  write_fadvise_dontneed: write behavior like with LIBRADOS_OP_FLAG_FADVISE_DONTNEED.
 	                          This mean data don't access in the near future.
@@ -55,14 +59,12 @@ def task(ctx, config):
               rollback: 2
               snap_remove: 0
             ec_pool: create an ec pool, defaults to False
-            erasure_code_use_hacky_overwrites: use the whitebox
-                                               testing experimental
-                                               overwrites mode
+            erasure_code_use_overwrites: test overwrites, default false
             erasure_code_profile:
               name: teuthologyprofile
               k: 2
               m: 1
-              ruleset-failure-domain: osd
+              crush-failure-domain: osd
             pool_snaps: true
 	    write_fadvise_dontneed: true
             runs: 10
@@ -139,21 +141,31 @@ def task(ctx, config):
         'ceph_test_rados']
     if config.get('ec_pool', False):
         args.extend(['--no-omap'])
-        if config.get('erasure_code_use_hacky_overwrites', False):
-            args.extend(['--no-sparse'])
-        else:
+        if not config.get('erasure_code_use_overwrites', False):
             args.extend(['--ec-pool'])
     if config.get('write_fadvise_dontneed', False):
         args.extend(['--write-fadvise-dontneed'])
+    if config.get('set_redirect', False):
+        args.extend(['--set_redirect'])
+    if config.get('set_chunk', False):
+        args.extend(['--set_chunk'])
+    if config.get('enable_dedup', False):
+        args.extend(['--enable_dedup'])
+    if config.get('low_tier_pool', None):
+        args.extend(['--low_tier_pool', config.get('low_tier_pool', None)])
     if config.get('pool_snaps', False):
         args.extend(['--pool-snaps'])
+    if config.get('balance_reads', False):
+        args.extend(['--balance-reads'])
+    if config.get('localize_reads', False):
+        args.extend(['--localize-reads'])
     args.extend([
         '--max-ops', str(config.get('ops', 10000)),
         '--objects', str(config.get('objects', 500)),
         '--max-in-flight', str(config.get('max_in_flight', 16)),
         '--size', str(object_size),
-        '--min-stride-size', str(config.get('min_stride_size', object_size / 10)),
-        '--max-stride-size', str(config.get('max_stride_size', object_size / 5)),
+        '--min-stride-size', str(config.get('min_stride_size', object_size // 10)),
+        '--max-stride-size', str(config.get('max_stride_size', object_size // 5)),
         '--max-seconds', str(config.get('max_seconds', 0))
         ])
 
@@ -189,14 +201,14 @@ def task(ctx, config):
 
     if config.get('write_append_excl', True):
         if 'write' in weights:
-            weights['write'] = weights['write'] / 2
+            weights['write'] = weights['write'] // 2
             weights['write_excl'] = weights['write']
 
         if 'append' in weights:
-            weights['append'] = weights['append'] / 2
+            weights['append'] = weights['append'] // 2
             weights['append_excl'] = weights['append']
 
-    for op, weight in weights.iteritems():
+    for op, weight in weights.items():
         args.extend([
             '--op', op, str(weight)
         ])
@@ -219,7 +231,7 @@ def task(ctx, config):
             existing_pools = config.get('pools', [])
             created_pools = []
             for role in config.get('clients', clients):
-                assert isinstance(role, basestring)
+                assert isinstance(role, six.string_types)
                 PREFIX = 'client.'
                 assert role.startswith(PREFIX)
                 id_ = role[len(PREFIX):]
@@ -230,15 +242,19 @@ def task(ctx, config):
                 else:
                     pool = manager.create_pool_with_unique_name(
                         erasure_code_profile_name=profile_name,
-                        erasure_code_use_hacky_overwrites=
-                          config.get('erasure_code_use_hacky_overwrites', False)
+                        erasure_code_use_overwrites=
+                          config.get('erasure_code_use_overwrites', False)
                     )
                     created_pools.append(pool)
                     if config.get('fast_read', False):
                         manager.raw_cluster_cmd(
                             'osd', 'pool', 'set', pool, 'fast_read', 'true')
+                    min_size = config.get('min_size', None);
+                    if min_size is not None:
+                        manager.raw_cluster_cmd(
+                            'osd', 'pool', 'set', pool, 'min_size', str(min_size))
 
-                (remote,) = ctx.cluster.only(role).remotes.iterkeys()
+                (remote,) = ctx.cluster.only(role).remotes.keys()
                 proc = remote.run(
                     args=["CEPH_CLIENT_ID={id_}".format(id_=id_)] + args +
                     ["--pool", pool],
@@ -247,9 +263,10 @@ def task(ctx, config):
                     wait=False
                     )
                 tests[id_] = proc
-            run.wait(tests.itervalues())
+            run.wait(tests.values())
 
             for pool in created_pools:
+                manager.wait_snap_trimming_complete(pool);
                 manager.remove_pool(pool)
 
     running = gevent.spawn(thread)

@@ -1,4 +1,5 @@
 set(mds_srcs
+  BatchOp.cc
   Capability.cc
   MDSDaemon.cc
   MDSRank.cc
@@ -11,6 +12,7 @@ set(mds_srcs
   MDCache.cc
   RecoveryQueue.cc
   StrayManager.cc
+  PurgeQueue.cc
   Locker.cc
   Migrator.cc
   MDBalancer.cc
@@ -28,6 +30,7 @@ set(mds_srcs
   SimpleLock.cc
   SnapRealm.cc
   SnapServer.cc
+  SnapClient.cc
   snap.cc
   SessionMap.cc
   MDSContext.cc
@@ -35,9 +38,15 @@ set(mds_srcs
   MDLog.cc
   MDSCacheObject.cc
   Mantle.cc
+  Anchor.cc
+  OpenFileTable.cc
+  MDSPinger.cc
+  MetricAggregator.cc
+  MetricsHandler.cc
   ${CMAKE_SOURCE_DIR}/src/common/TrackedOp.cc
-  ${CMAKE_SOURCE_DIR}/src/osdc/Journaler.cc)
-add_library(mds STATIC ${mds_srcs}
-  $<TARGET_OBJECTS:heap_profiler_objs>
-  $<TARGET_OBJECTS:common_util_obj>)
-target_link_libraries(mds ${ALLOC_LIBS} osdc common liblua)
+  ${CMAKE_SOURCE_DIR}/src/common/MemoryModel.cc
+  ${CMAKE_SOURCE_DIR}/src/osdc/Journaler.cc
+  ${CMAKE_SOURCE_DIR}/src/mgr/MDSPerfMetricTypes.cc)
+add_library(mds STATIC ${mds_srcs})
+target_link_libraries(mds PRIVATE
+  heap_profiler cpu_profiler osdc liblua)

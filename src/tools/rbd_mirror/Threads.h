@@ -4,22 +4,31 @@
 #ifndef CEPH_RBD_MIRROR_THREADS_H
 #define CEPH_RBD_MIRROR_THREADS_H
 
-#include "common/Mutex.h"
+#include "include/common_fwd.h"
+#include "common/ceph_mutex.h"
 
-class CephContext;
-class ContextWQ;
 class SafeTimer;
 class ThreadPool;
+
+namespace librbd {
+struct AsioEngine;
+struct ImageCtx;
+namespace asio { struct ContextWQ; }
+} // namespace librbd
 
 namespace rbd {
 namespace mirror {
 
-struct Threads {
-  ThreadPool *thread_pool = nullptr;
-  ContextWQ *work_queue = nullptr;
+template <typename ImageCtxT = librbd::ImageCtx>
+class Threads {
+private:
+  librbd::AsioEngine* asio_engine = nullptr;
+
+public:
+  librbd::asio::ContextWQ* work_queue = nullptr;
 
   SafeTimer *timer = nullptr;
-  Mutex timer_lock;
+  ceph::mutex timer_lock = ceph::make_mutex("Threads::timer_lock");
 
   explicit Threads(CephContext *cct);
   Threads(const Threads&) = delete;
@@ -30,5 +39,7 @@ struct Threads {
 
 } // namespace mirror
 } // namespace rbd
+
+extern template class rbd::mirror::Threads<librbd::ImageCtx>;
 
 #endif // CEPH_RBD_MIRROR_THREADS_H

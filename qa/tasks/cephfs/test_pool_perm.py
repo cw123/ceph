@@ -19,8 +19,8 @@ class TestPoolPerm(CephFSTestCase):
                 if {check_read}:
                     ret = os.read(fd, 1024)
                 else:
-                    os.write(fd, 'content')
-            except OSError, e:
+                    os.write(fd, b'content')
+            except OSError as e:
                 if e.errno != errno.EPERM:
                     raise
             else:
@@ -35,8 +35,7 @@ class TestPoolPerm(CephFSTestCase):
             'allow r pool={0}'.format(self.fs.get_data_pool_name()))
 
         self.mount_a.umount_wait()
-        self.mount_a.mount()
-        self.mount_a.wait_until_mounted()
+        self.mount_a.mount_wait()
 
         # write should fail
         self.mount_a.run_python(remote_script.format(path=file_path, check_read=str(False)))
@@ -47,8 +46,7 @@ class TestPoolPerm(CephFSTestCase):
             'allow w pool={0}'.format(self.fs.get_data_pool_name()))
 
         self.mount_a.umount_wait()
-        self.mount_a.mount()
-        self.mount_a.wait_until_mounted()
+        self.mount_a.mount_wait()
 
         # read should fail
         self.mount_a.run_python(remote_script.format(path=file_path, check_read=str(True)))
@@ -77,17 +75,14 @@ class TestPoolPerm(CephFSTestCase):
             ))
 
         self.mount_a.umount_wait()
-        self.mount_a.mount()
-        self.mount_a.wait_until_mounted()
+        self.mount_a.mount_wait()
 
         with self.assertRaises(CommandFailedError):
-            self.mount_a.run_shell(["setfattr",
-                                    "-n", "ceph.file.layout.pool",
-                                    "-v", new_pool_name, "layoutfile"])
+            self.mount_a.setfattr("layoutfile", "ceph.file.layout.pool",
+                                  new_pool_name)
         with self.assertRaises(CommandFailedError):
-            self.mount_a.run_shell(["setfattr",
-                                    "-n", "ceph.dir.layout.pool",
-                                    "-v", new_pool_name, "layoutdir"])
+            self.mount_a.setfattr("layoutdir", "ceph.dir.layout.pool",
+                                  new_pool_name)
         self.mount_a.umount_wait()
 
         # Set MDS 'rwp' perms: should now be able to set layouts
@@ -98,14 +93,11 @@ class TestPoolPerm(CephFSTestCase):
                 self.fs.get_data_pool_names()[0],
                 self.fs.get_data_pool_names()[1],
             ))
-        self.mount_a.mount()
-        self.mount_a.wait_until_mounted()
-        self.mount_a.run_shell(["setfattr",
-                                "-n", "ceph.file.layout.pool",
-                                "-v", new_pool_name, "layoutfile"])
-        self.mount_a.run_shell(["setfattr",
-                                "-n", "ceph.dir.layout.pool",
-                                "-v", new_pool_name, "layoutdir"])
+        self.mount_a.mount_wait()
+        self.mount_a.setfattr("layoutfile", "ceph.file.layout.pool",
+                              new_pool_name)
+        self.mount_a.setfattr("layoutdir", "ceph.dir.layout.pool",
+                              new_pool_name)
         self.mount_a.umount_wait()
 
     def tearDown(self):

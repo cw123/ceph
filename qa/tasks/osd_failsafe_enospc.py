@@ -1,12 +1,12 @@
 """
 Handle osdfailsafe configuration settings (nearfull ratio and full ratio)
 """
-from cStringIO import StringIO
+from io import StringIO
 import logging
 import time
 
 from teuthology.orchestra import run
-from util.rados import rados
+from tasks.util.rados import rados
 from teuthology import misc as teuthology
 
 log = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ def task(ctx, config):
     log.info('1. Verify warning messages when exceeding nearfull_ratio')
 
     first_mon = teuthology.get_first_mon(ctx, config)
-    (mon,) = ctx.cluster.only(first_mon).remotes.iterkeys()
+    (mon,) = ctx.cluster.only(first_mon).remotes.keys()
 
     proc = mon.run(
              args=[

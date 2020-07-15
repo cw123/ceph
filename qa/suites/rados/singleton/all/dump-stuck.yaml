@@ -1,5 +1,6 @@
 roles:
 - - mon.a
+  - mgr.x
   - osd.0
   - osd.1
 openstack:
@@ -9,6 +10,12 @@ openstack:
 tasks:
 - install:
 - ceph:
+    pre-mgr-commands:
+      - sudo ceph config set mgr mgr/devicehealth/enable_monitoring false --force
     log-whitelist:
-    - wrongly marked me down
+      - but it is still running
+      - overall HEALTH_
+      - \(OSDMAP_FLAGS\)
+      - \(OSD_
+      - \(PG_
 - dump_stuck:

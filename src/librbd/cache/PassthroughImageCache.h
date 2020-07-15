@@ -17,25 +17,34 @@ namespace cache {
  * Example passthrough client-side, image extent cache
  */
 template <typename ImageCtxT = librbd::ImageCtx>
-class PassthroughImageCache : public ImageCache {
+class PassthroughImageCache : public ImageCache<ImageCtxT> {
 public:
-  PassthroughImageCache(ImageCtx &image_ctx);
+  using typename ImageCache<ImageCtxT>::Extents;
+  explicit PassthroughImageCache(ImageCtx &image_ctx);
 
   /// client AIO methods
-  virtual void aio_read(Extents&& image_extents, ceph::bufferlist *bl,
-                        int fadvise_flags, Context *on_finish);
-  virtual void aio_write(Extents&& image_extents, ceph::bufferlist&& bl,
-                         int fadvise_flags, Context *on_finish);
-  virtual void aio_discard(uint64_t offset, uint64_t length,
-                           Context *on_finish);
-  virtual void aio_flush(Context *on_finish);
+  void aio_read(Extents&& image_extents, ceph::bufferlist *bl,
+                int fadvise_flags, Context *on_finish) override;
+  void aio_write(Extents&& image_extents, ceph::bufferlist&& bl,
+                 int fadvise_flags, Context *on_finish) override;
+  void aio_discard(uint64_t offset, uint64_t length,
+                   uint32_t discard_granularity_bytes,
+                   Context *on_finish) override;
+  void aio_flush(librbd::io::FlushSource flush_source, Context *on_finish) override;
+  void aio_writesame(uint64_t offset, uint64_t length,
+                     ceph::bufferlist&& bl,
+                     int fadvise_flags, Context *on_finish) override;
+  void aio_compare_and_write(Extents&& image_extents,
+                             ceph::bufferlist&& cmp_bl, ceph::bufferlist&& bl,
+                             uint64_t *mismatch_offset,int fadvise_flags,
+                             Context *on_finish) override;
 
   /// internal state methods
-  virtual void init(Context *on_finish);
-  virtual void shut_down(Context *on_finish);
+  void init(Context *on_finish) override;
+  void shut_down(Context *on_finish) override;
 
-  virtual void invalidate(Context *on_finish);
-  virtual void flush(Context *on_finish);
+  void invalidate(Context *on_finish) override;
+  void flush(Context *on_finish) override;
 
 private:
   ImageCtxT &m_image_ctx;

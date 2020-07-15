@@ -1,5 +1,6 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -22,8 +23,6 @@
 #include <include/str_list.h>
 
 #include "rgw_cors.h"
-
-using namespace std;
 
 class RGWCORSConfiguration_SWIFT : public RGWCORSConfiguration
 {

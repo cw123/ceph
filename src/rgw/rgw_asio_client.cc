@@ -1,51 +1,53 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/asio/write.hpp>
 
 #include "rgw_asio_client.h"
+#include "rgw_perf_counters.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
 
-#undef dout_prefix
-#define dout_prefix (*_dout << "asio: ")
+using namespace rgw::asio;
 
-
-RGWAsioClientIO::RGWAsioClientIO(tcp::socket&& socket,
-                                 request_type&& request)
-  : socket(std::move(socket)),
-    request(std::move(request)),
-    txbuf(*this) {
+ClientIO::ClientIO(parser_type& parser, bool is_ssl,
+                   const endpoint_type& local_endpoint,
+                   const endpoint_type& remote_endpoint)
+  : parser(parser), is_ssl(is_ssl),
+    local_endpoint(local_endpoint),
+    remote_endpoint(remote_endpoint),
+    txbuf(*this)
+{
 }
 
-RGWAsioClientIO::~RGWAsioClientIO() = default;
+ClientIO::~ClientIO() = default;
 
-void RGWAsioClientIO::init_env(CephContext *cct)
+int ClientIO::init_env(CephContext *cct)
 {
   env.init(cct);
-  body_iter = request.body.begin();
 
-  const auto& headers = request.headers;
+  perfcounter->inc(l_rgw_qlen);
+  perfcounter->inc(l_rgw_qactive);
+
+  const auto& request = parser.get();
+  const auto& headers = request;
   for (auto header = headers.begin(); header != headers.end(); ++header) {
-    const auto& name = header->name();
+    const auto& field = header->name(); // enum type for known headers
+    const auto& name = header->name_string();
     const auto& value = header->value();
 
-    if (boost::algorithm::iequals(name, "content-length")) {
-      env.set("CONTENT_LENGTH", value);
+    if (field == beast::http::field::content_length) {
+      env.set("CONTENT_LENGTH", value.to_string());
       continue;
     }
-    if (boost::algorithm::iequals(name, "content-type")) {
-      env.set("CONTENT_TYPE", value);
+    if (field == beast::http::field::content_type) {
+      env.set("CONTENT_TYPE", value.to_string());
       continue;
-    }
-    if (boost::algorithm::iequals(name, "connection")) {
-      conn_keepalive = boost::algorithm::iequals(value, "keep-alive");
-      conn_close = boost::algorithm::iequals(value, "close");
     }
 
-    static const boost::string_ref HTTP_{"HTTP_"};
+    static const std::string_view HTTP_{"HTTP_"};
 
     char buf[name.size() + HTTP_.size() + 1];
     auto dest = std::copy(std::begin(HTTP_), std::end(HTTP_), buf);
@@ -58,64 +60,51 @@ void RGWAsioClientIO::init_env(CephContext *cct)
     }
     *dest = '\0';
 
-    env.set(buf, value);
+    env.set(buf, value.to_string());
   }
 
-  env.set("REQUEST_METHOD", request.method);
+  int major = request.version() / 10;
+  int minor = request.version() % 10;
+  env.set("HTTP_VERSION", std::to_string(major) + '.' + std::to_string(minor));
+
+  env.set("REQUEST_METHOD", request.method_string().to_string());
 
   // split uri from query
-  auto url = boost::string_ref{request.url};
-  auto pos = url.find('?');
-  auto query = url.substr(pos + 1);
-  url = url.substr(0, pos);
+  auto uri = request.target();
+  auto pos = uri.find('?');
+  if (pos != uri.npos) {
+    auto query = uri.substr(pos + 1);
+    env.set("QUERY_STRING", query.to_string());
+    uri = uri.substr(0, pos);
+  }
+  env.set("SCRIPT_URI", uri.to_string());
 
-  env.set("REQUEST_URI", url);
-  env.set("QUERY_STRING", query);
-  env.set("SCRIPT_URI", url); /* FIXME */
+  env.set("REQUEST_URI", request.target().to_string());
 
   char port_buf[16];
-  snprintf(port_buf, sizeof(port_buf), "%d", socket.local_endpoint().port());
+  snprintf(port_buf, sizeof(port_buf), "%d", local_endpoint.port());
   env.set("SERVER_PORT", port_buf);
-  // TODO: set SERVER_PORT_SECURE if using ssl
-  // TODO: set REMOTE_USER if authenticated
-}
-
-size_t RGWAsioClientIO::write_data(const char* const buf,
-                                   const size_t len)
-{
-  boost::system::error_code ec;
-  auto bytes = boost::asio::write(socket, boost::asio::buffer(buf, len), ec);
-  if (ec) {
-    derr << "write_data failed: " << ec.message() << dendl;
-    throw rgw::io::Exception(ec.value(), std::system_category());
-  } else {
-    /* According to the documentation of boost::asio::write if there is
-     * no error (signalised by ec), then bytes == len. We don't need to
-     * take care of partial writes in such situation. */
-    return bytes;
+  if (is_ssl) {
+    env.set("SERVER_PORT_SECURE", port_buf);
   }
-}
-
-size_t RGWAsioClientIO::read_data(char* const buf, const size_t max)
-{
-  // read data from the body's bufferlist
-  auto bytes = std::min<unsigned>(max, body_iter.get_remaining());
-  body_iter.copy(bytes, buf);
-  return bytes;
-}
-
-size_t RGWAsioClientIO::complete_request()
-{
+  env.set("REMOTE_ADDR", remote_endpoint.address().to_string());
+  // TODO: set REMOTE_USER if authenticated
   return 0;
 }
 
-void RGWAsioClientIO::flush()
+size_t ClientIO::complete_request()
+{
+  perfcounter->inc(l_rgw_qlen, -1);
+  perfcounter->inc(l_rgw_qactive, -1);
+  return 0;
+}
+
+void ClientIO::flush()
 {
   txbuf.pubsync();
 }
 
-size_t RGWAsioClientIO::send_status(const int status,
-                                    const char* const status_name)
+size_t ClientIO::send_status(int status, const char* status_name)
 {
   static constexpr size_t STATUS_BUF_SIZE = 128;
 
@@ -126,7 +115,7 @@ size_t RGWAsioClientIO::send_status(const int status,
   return txbuf.sputn(statusbuf, statuslen);
 }
 
-size_t RGWAsioClientIO::send_100_continue()
+size_t ClientIO::send_100_continue()
 {
   const char HTTTP_100_CONTINUE[] = "HTTP/1.1 100 CONTINUE\r\n\r\n";
   const size_t sent = txbuf.sputn(HTTTP_100_CONTINUE,
@@ -148,7 +137,7 @@ static size_t dump_date_header(char (&timestr)[TIME_BUF_SIZE])
                   "Date: %a, %d %b %Y %H:%M:%S %Z\r\n", tmp);
 }
 
-size_t RGWAsioClientIO::complete_header()
+size_t ClientIO::complete_header()
 {
   size_t sent = 0;
 
@@ -157,10 +146,10 @@ size_t RGWAsioClientIO::complete_header()
     sent += txbuf.sputn(timestr, strlen(timestr));
   }
 
-  if (conn_keepalive) {
+  if (parser.keep_alive()) {
     constexpr char CONN_KEEP_ALIVE[] = "Connection: Keep-Alive\r\n";
     sent += txbuf.sputn(CONN_KEEP_ALIVE, sizeof(CONN_KEEP_ALIVE) - 1);
-  } else if (conn_close) {
+  } else {
     constexpr char CONN_KEEP_CLOSE[] = "Connection: close\r\n";
     sent += txbuf.sputn(CONN_KEEP_CLOSE, sizeof(CONN_KEEP_CLOSE) - 1);
   }
@@ -172,8 +161,8 @@ size_t RGWAsioClientIO::complete_header()
   return sent;
 }
 
-size_t RGWAsioClientIO::send_header(const boost::string_ref& name,
-                                    const boost::string_ref& value)
+size_t ClientIO::send_header(const std::string_view& name,
+                             const std::string_view& value)
 {
   static constexpr char HEADER_SEP[] = ": ";
   static constexpr char HEADER_END[] = "\r\n";
@@ -188,7 +177,7 @@ size_t RGWAsioClientIO::send_header(const boost::string_ref& name,
   return sent;
 }
 
-size_t RGWAsioClientIO::send_content_length(const uint64_t len)
+size_t ClientIO::send_content_length(uint64_t len)
 {
   static constexpr size_t CONLEN_BUF_SIZE = 128;
 

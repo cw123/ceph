@@ -23,30 +23,35 @@ public:
   Metadata data;
 
 private:
-  static const int HEAD_VERSION = 1;
-  ~MMonMetadata() {}
+  static constexpr int HEAD_VERSION = 1;
+  ~MMonMetadata() override {}
 
 public:
   MMonMetadata() :
-    Message(CEPH_MSG_MON_METADATA)
+    Message{CEPH_MSG_MON_METADATA}
   {}
   MMonMetadata(const Metadata& metadata) :
-    Message(CEPH_MSG_MON_METADATA, HEAD_VERSION),
+    Message{CEPH_MSG_MON_METADATA, HEAD_VERSION},
     data(metadata)
   {}
 
-  virtual const char *get_type_name() const {
+  std::string_view get_type_name() const override {
     return "mon_metadata";
   }
 
-  virtual void encode_payload(uint64_t features) {
-    ::encode(data, payload);
+  void encode_payload(uint64_t features) override {
+    using ceph::encode;
+    encode(data, payload);
   }
 
-  virtual void decode_payload() {
-    bufferlist::iterator p = payload.begin();
-    ::decode(data, p);
+  void decode_payload() override {
+    using ceph::decode;
+    auto p = payload.cbegin();
+    decode(data, p);
   }
+private:
+  template<class T, typename... Args>
+  friend boost::intrusive_ptr<T> ceph::make_message(Args&&... args);
 };
 
 #endif

@@ -9,12 +9,13 @@
 #ifdef HAVE_LIBROCKSDB
 #include "RocksDBStore.h"
 #endif
-#ifdef HAVE_KINETIC
-#include "KineticStore.h"
-#endif
+
+using std::map;
+using std::string;
 
 KeyValueDB *KeyValueDB::create(CephContext *cct, const string& type,
 			       const string& dir,
+			       map<string,string> options,
 			       void *p)
 {
 #ifdef WITH_LEVELDB
@@ -22,15 +23,9 @@ KeyValueDB *KeyValueDB::create(CephContext *cct, const string& type,
     return new LevelDBStore(cct, dir);
   }
 #endif
-#ifdef HAVE_KINETIC
-  if (type == "kinetic" &&
-      cct->check_experimental_feature_enabled("kinetic")) {
-    return new KineticStore(cct);
-  }
-#endif
 #ifdef HAVE_LIBROCKSDB
   if (type == "rocksdb") {
-    return new RocksDBStore(cct, dir, p);
+    return new RocksDBStore(cct, dir, options, p);
   }
 #endif
 
@@ -46,11 +41,6 @@ int KeyValueDB::test_init(const string& type, const string& dir)
 #ifdef WITH_LEVELDB
   if (type == "leveldb") {
     return LevelDBStore::_test_init(dir);
-  }
-#endif
-#ifdef HAVE_KINETIC
-  if (type == "kinetic") {
-    return KineticStore::_test_init(g_ceph_context);
   }
 #endif
 #ifdef HAVE_LIBROCKSDB

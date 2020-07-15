@@ -7,6 +7,7 @@
 #include <string>
 #include <map>
 #include <mutex>
+#include <functional>
 
 #include "common/Thread.h"
 #include "include/buffer.h"
@@ -22,20 +23,20 @@ public:
 
   struct OpenFile {
     std::string path;
-    bufferlist bl;
+    ceph::buffer::list bl;
     bool dirty = false;
     int ref = 0;
   };
   std::map<std::string,OpenFile*> open_files;
 
   int open_file(std::string p, struct fuse_file_info *fi,
-		std::function<int(bufferlist *bl)> f);
+		std::function<int(ceph::buffer::list *bl)> f);
 
   class FuseThread : public Thread {
     FuseStore *fs;
   public:
     explicit FuseThread(FuseStore *f) : fs(f) {}
-    void *entry() {
+    void *entry() override {
       fs->loop();
       return NULL;
     }

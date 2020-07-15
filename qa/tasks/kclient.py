@@ -5,8 +5,10 @@ import contextlib
 import logging
 
 from teuthology.misc import deep_merge
+from teuthology.orchestra.run import CommandFailedError
 from teuthology import misc
-from cephfs.kernel_mount import KernelMount
+from teuthology.contextutil import MaxWhileTries
+from tasks.cephfs.kernel_mount import KernelMount
 
 log = logging.getLogger(__name__)
 
@@ -20,12 +22,16 @@ def task(ctx, config):
     this operation on. This lets you e.g. set up one client with
     ``ceph-fuse`` and another with ``kclient``.
 
+    ``brxnet`` should be a Private IPv4 Address range, default range is
+    [192.168.0.0/16]
+
     Example that mounts all clients::
 
         tasks:
         - ceph:
         - kclient:
         - interactive:
+        - brxnet: [192.168.0.0/16]
 
     Example that uses both ``kclient` and ``ceph-fuse``::
 
@@ -70,13 +76,6 @@ def task(ctx, config):
 
     test_dir = misc.get_testdir(ctx)
 
-    # Assemble mon addresses
-    remotes_and_roles = ctx.cluster.remotes.items()
-    roles = [roles for (remote_, roles) in remotes_and_roles]
-    ips = [remote_.ssh.get_transport().getpeername()[0]
-           for (remote_, _) in remotes_and_roles]
-    mons = misc.get_mons(roles, ips).values()
-
     mounts = {}
     for id_, remote in clients:
         client_config = config.get("client.%s" % id_)
@@ -87,13 +86,11 @@ def task(ctx, config):
             continue
 
         kernel_mount = KernelMount(
-            mons,
+            ctx,
             test_dir,
             id_,
             remote,
-            ctx.teuthology_config.get('ipmi_user', None),
-            ctx.teuthology_config.get('ipmi_password', None),
-            ctx.teuthology_config.get('ipmi_domain', None)
+            ctx.teuthology_config.get('brxnet', None),
         )
 
         mounts[id_] = kernel_mount
@@ -104,11 +101,32 @@ def task(ctx, config):
 
         kernel_mount.mount()
 
+
+    def umount_all():
+        log.info('Unmounting kernel clients...')
+
+        forced = False
+        for mount in mounts.values():
+            if mount.is_mounted():
+                try:
+                    mount.umount()
+                except (CommandFailedError, MaxWhileTries):
+                    log.warning("Ordinary umount failed, forcing...")
+                    forced = True
+                    mount.umount_wait(force=True)
+
+        return forced
+
     ctx.mounts = mounts
     try:
         yield mounts
+    except:
+        umount_all()  # ignore forced retval, we are already in error handling
     finally:
-        log.info('Unmounting kernel clients...')
-        for mount in mounts.values():
-            if mount.is_mounted():
-                mount.umount()
+
+        forced = umount_all()
+        if forced:
+            # The context managers within the kclient manager worked (i.e.
+            # the test workload passed) but for some reason we couldn't
+            # umount, so turn this into a test failure.
+            raise RuntimeError("Kernel mounts did not umount cleanly")

@@ -6,7 +6,7 @@ Overview
 --------
 Rados supports two related snapshotting mechanisms:
 
-  1. *pool snaps*: snapshots are implicitely applied to all objects
+  1. *pool snaps*: snapshots are implicitly applied to all objects
      in a pool
   2. *self managed snaps*: the user must provide the current *SnapContext*
      on each write.
@@ -74,6 +74,9 @@ pg is clean and not scrubbing.
   #. We determine the next object for trimming out of PG::snap_mapper.
      For each object, we create a log entry and repop updating the
      object info and the snap set (including adjusting the overlaps).
+     If the object is a clone which no longer belongs to any live snapshots,
+     it is removed here. (See PrimaryLogPG::trim_object() when new_snaps
+     is empty.)
   #. We also locally update our *SnapMapper* instance with the object's
      new snaps.
   #. The log entry containing the modification of the object also
@@ -81,6 +84,7 @@ pg is clean and not scrubbing.
      its own *SnapMapper* instance.
   #. The primary shares the info with the replica, which persists
      the new set of purged_snaps along with the rest of the info.
+
 
 
 Recovery
@@ -94,7 +98,7 @@ retrim a now empty snap.
 SnapMapper
 ----------
 *SnapMapper* is implemented on top of map_cacher<string, bufferlist>,
-which provides an interface over a backing store such as the filesystem
+which provides an interface over a backing store such as the file system
 with async transactions.  While transactions are incomplete, the map_cacher
 instance buffers unstable keys allowing consistent access without having
 to flush the filestore.  *SnapMapper* provides two mappings:

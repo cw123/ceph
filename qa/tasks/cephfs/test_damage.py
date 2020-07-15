@@ -12,6 +12,7 @@ DAMAGED_ON_START = "damaged_on_start"
 DAMAGED_ON_LS = "damaged_on_ls"
 CRASHED = "server crashed"
 NO_DAMAGE = "no damage"
+READONLY = "readonly"
 FAILED_CLIENT = "client failed"
 FAILED_SERVER = "server failed"
 
@@ -134,47 +135,66 @@ class TestDamage(CephFSTestCase):
         mutations = []
 
         # Removals
-        for obj_id in objects:
-            if obj_id in [
+        for o in objects:
+            if o in [
                 # JournalPointers are auto-replaced if missing (same path as upgrade)
                 "400.00000000",
                 # Missing dirfrags for non-system dirs result in empty directory
                 "10000000000.00000000",
+                # PurgeQueue is auto-created if not found on startup
+                "500.00000000",
+                # open file table is auto-created if not found on startup
+                "mds0_openfiles.0"
             ]:
                 expectation = NO_DAMAGE
             else:
                 expectation = DAMAGED_ON_START
 
             log.info("Expectation on rm '{0}' will be '{1}'".format(
-                obj_id, expectation
+                o, expectation
             ))
 
             mutations.append(MetadataMutation(
-                obj_id,
-                "Delete {0}".format(obj_id),
-                lambda o=obj_id: self.fs.rados(["rm", o]),
+                o,
+                "Delete {0}".format(o),
+                lambda o=o: self.fs.rados(["rm", o]),
                 expectation
             ))
 
         # Blatant corruptions
-        mutations.extend([
-            MetadataMutation(
-                o,
-                "Corrupt {0}".format(o),
-                lambda o=o: self.fs.rados(["put", o, "-"], stdin_data=junk),
-                DAMAGED_ON_START
-            ) for o in data_objects
-        ])
+        for obj_id in data_objects:
+            if obj_id == "500.00000000":
+                # purge queue corruption results in read-only FS
+                mutations.append(MetadataMutation(
+                    obj_id,
+                    "Corrupt {0}".format(obj_id),
+                    lambda o=obj_id: self.fs.rados(["put", o, "-"], stdin_data=junk),
+                    READONLY
+                ))
+            else:
+                mutations.append(MetadataMutation(
+                    obj_id,
+                    "Corrupt {0}".format(obj_id),
+                    lambda o=obj_id: self.fs.rados(["put", o, "-"], stdin_data=junk),
+                    DAMAGED_ON_START
+                ))
 
         # Truncations
-        mutations.extend([
-            MetadataMutation(
-                o,
-                "Truncate {0}".format(o),
-                lambda o=o: self.fs.rados(["truncate", o, "0"]),
-                DAMAGED_ON_START
-            ) for o in data_objects
-        ])
+        for o in data_objects:
+            if o == "500.00000000":
+                # The PurgeQueue is allowed to be empty: Journaler interprets
+                # an empty header object as an empty journal.
+                expectation = NO_DAMAGE
+            else:
+                expectation = DAMAGED_ON_START
+
+            mutations.append(
+                MetadataMutation(
+                    o,
+                    "Truncate {0}".format(o),
+                    lambda o=o: self.fs.rados(["truncate", o, "0"]),
+                    expectation
+            ))
 
         # OMAP value corruptions
         for o, k in omap_keys:
@@ -195,22 +215,22 @@ class TestDamage(CephFSTestCase):
             )
 
         # OMAP header corruptions
-        for obj_id in omap_header_objs:
-            if re.match("60.\.00000000", obj_id) \
-                    or obj_id in ["1.00000000", "100.00000000", "mds0_sessionmap"]:
+        for o in omap_header_objs:
+            if re.match("60.\.00000000", o) \
+                    or o in ["1.00000000", "100.00000000", "mds0_sessionmap"]:
                 expectation = DAMAGED_ON_START
             else:
                 expectation = NO_DAMAGE
 
             log.info("Expectation on corrupt header '{0}' will be '{1}'".format(
-                obj_id, expectation
+                o, expectation
             ))
 
             mutations.append(
                 MetadataMutation(
-                    obj_id,
-                    "Corrupt omap header on {0}".format(obj_id),
-                    lambda o=obj_id: self.fs.rados(["setomapheader", o, junk]),
+                    o,
+                    "Corrupt omap header on {0}".format(o),
+                    lambda o=o: self.fs.rados(["setomapheader", o, junk]),
                     expectation
                 )
             )
@@ -285,8 +305,7 @@ class TestDamage(CephFSTestCase):
                 log.info("Daemons came up after mutation '{0}', proceeding to ls".format(mutation.desc))
 
             # MDS is up, should go damaged on ls or client mount
-            self.mount_a.mount()
-            self.mount_a.wait_until_mounted()
+            self.mount_a.mount_wait()
             if mutation.ls_path == ".":
                 proc = self.mount_a.run_shell(["ls", "-R", mutation.ls_path], wait=False)
             else:
@@ -305,7 +324,17 @@ class TestDamage(CephFSTestCase):
                     else:
                         log.error("Result: Failed to go damaged on mutation '{0}'".format(mutation.desc))
                         results[mutation] = FAILED_SERVER
-
+            elif mutation.expectation == READONLY:
+                proc = self.mount_a.run_shell(["mkdir", "foo"], wait=False)
+                try:
+                    proc.wait()
+                except CommandFailedError:
+                    stderr = proc.stderr.getvalue()
+                    log.info(stderr)
+                    if "Read-only file system".lower() in stderr.lower():
+                        pass
+                    else:
+                        raise
             else:
                 try:
                     wait([proc], 20)
@@ -371,8 +400,7 @@ class TestDamage(CephFSTestCase):
         self.fs.mds_restart()
         self.fs.wait_for_daemons()
 
-        self.mount_a.mount()
-        self.mount_a.wait_until_mounted()
+        self.mount_a.mount_wait()
         dentries = self.mount_a.ls("subdir/")
 
         # The damaged guy should have disappeared
@@ -423,7 +451,7 @@ class TestDamage(CephFSTestCase):
         self.mount_a.umount_wait()
 
         # Now repair the stats
-        scrub_json = self.fs.mds_asok(["scrub_path", "/subdir", "repair"])
+        scrub_json = self.fs.rank_tell(["scrub", "start", "/subdir", "repair"])
         log.info(json.dumps(scrub_json, indent=2))
 
         self.assertEqual(scrub_json["passed_validation"], False)
@@ -431,8 +459,7 @@ class TestDamage(CephFSTestCase):
         self.assertEqual(scrub_json["raw_stats"]["passed"], False)
 
         # Check that the file count is now correct
-        self.mount_a.mount()
-        self.mount_a.wait_until_mounted()
+        self.mount_a.mount_wait()
         nfiles = self.mount_a.getfattr("./subdir", "ceph.dir.files")
         self.assertEqual(nfiles, "1")
 
@@ -447,3 +474,93 @@ class TestDamage(CephFSTestCase):
         # Now I should be able to create a file with the same name as the
         # damaged guy if I want.
         self.mount_a.touch("subdir/file_to_be_damaged")
+
+    def test_open_ino_errors(self):
+        """
+        That errors encountered during opening inos are properly propagated
+        """
+
+        self.mount_a.run_shell(["mkdir", "dir1"])
+        self.mount_a.run_shell(["touch", "dir1/file1"])
+        self.mount_a.run_shell(["mkdir", "dir2"])
+        self.mount_a.run_shell(["touch", "dir2/file2"])
+        self.mount_a.run_shell(["mkdir", "testdir"])
+        self.mount_a.run_shell(["ln", "dir1/file1", "testdir/hardlink1"])
+        self.mount_a.run_shell(["ln", "dir2/file2", "testdir/hardlink2"])
+
+        file1_ino = self.mount_a.path_to_ino("dir1/file1")
+        file2_ino = self.mount_a.path_to_ino("dir2/file2")
+        dir2_ino = self.mount_a.path_to_ino("dir2")
+
+        # Ensure everything is written to backing store
+        self.mount_a.umount_wait()
+        self.fs.mds_asok(["flush", "journal"])
+
+        # Drop everything from the MDS cache
+        self.mds_cluster.mds_stop()
+        self.fs.journal_tool(['journal', 'reset'], 0)
+        self.mds_cluster.mds_fail_restart()
+        self.fs.wait_for_daemons()
+
+        self.mount_a.mount_wait()
+
+        # Case 1: un-decodeable backtrace
+
+        # Validate that the backtrace is present and decodable
+        self.fs.read_backtrace(file1_ino)
+        # Go corrupt the backtrace of alpha/target (used for resolving
+        # bravo/hardlink).
+        self.fs._write_data_xattr(file1_ino, "parent", "rhubarb")
+
+        # Check that touching the hardlink gives EIO
+        ran = self.mount_a.run_shell(["stat", "testdir/hardlink1"], wait=False)
+        try:
+            ran.wait()
+        except CommandFailedError:
+            self.assertTrue("Input/output error" in ran.stderr.getvalue())
+
+        # Check that an entry is created in the damage table
+        damage = json.loads(
+            self.fs.mon_manager.raw_cluster_cmd(
+                'tell', 'mds.{0}'.format(self.fs.get_active_names()[0]),
+                "damage", "ls", '--format=json-pretty'))
+        self.assertEqual(len(damage), 1)
+        self.assertEqual(damage[0]['damage_type'], "backtrace")
+        self.assertEqual(damage[0]['ino'], file1_ino)
+
+        self.fs.mon_manager.raw_cluster_cmd(
+            'tell', 'mds.{0}'.format(self.fs.get_active_names()[0]),
+            "damage", "rm", str(damage[0]['id']))
+
+
+        # Case 2: missing dirfrag for the target inode
+
+        self.fs.rados(["rm", "{0:x}.00000000".format(dir2_ino)])
+
+        # Check that touching the hardlink gives EIO
+        ran = self.mount_a.run_shell(["stat", "testdir/hardlink2"], wait=False)
+        try:
+            ran.wait()
+        except CommandFailedError:
+            self.assertTrue("Input/output error" in ran.stderr.getvalue())
+
+        # Check that an entry is created in the damage table
+        damage = json.loads(
+            self.fs.mon_manager.raw_cluster_cmd(
+                'tell', 'mds.{0}'.format(self.fs.get_active_names()[0]),
+                "damage", "ls", '--format=json-pretty'))
+        self.assertEqual(len(damage), 2)
+        if damage[0]['damage_type'] == "backtrace" :
+            self.assertEqual(damage[0]['ino'], file2_ino)
+            self.assertEqual(damage[1]['damage_type'], "dir_frag")
+            self.assertEqual(damage[1]['ino'], dir2_ino)
+        else:
+            self.assertEqual(damage[0]['damage_type'], "dir_frag")
+            self.assertEqual(damage[0]['ino'], dir2_ino)
+            self.assertEqual(damage[1]['damage_type'], "backtrace")
+            self.assertEqual(damage[1]['ino'], file2_ino)
+
+        for entry in damage:
+            self.fs.mon_manager.raw_cluster_cmd(
+                'tell', 'mds.{0}'.format(self.fs.get_active_names()[0]),
+                "damage", "rm", str(entry['id']))

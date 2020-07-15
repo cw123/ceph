@@ -16,10 +16,11 @@
 #define CEPH_COMMON_STRTOL_H
 
 #include <string>
-#include <limits>
 extern "C" {
 #include <stdint.h>
 }
+
+bool strict_strtob(const char* str, std::string *err);
 
 long long strict_strtoll(const char *str, int base, std::string *err);
 
@@ -28,6 +29,11 @@ int strict_strtol(const char *str, int base, std::string *err);
 double strict_strtod(const char *str, std::string *err);
 
 float strict_strtof(const char *str, std::string *err);
+
+uint64_t strict_iecstrtoll(const char *str, std::string *err);
+
+template<typename T>
+T strict_iec_cast(const char *str, std::string *err);
 
 uint64_t strict_sistrtoll(const char *str, std::string *err);
 
@@ -43,7 +49,7 @@ template<typename T, const unsigned base = 10, const unsigned width = 1>
 static inline
 char* ritoa(T u, char *buf)
 {
-  static_assert(std::is_unsigned<T>::value, "signed types are not supported");
+  static_assert(std::is_unsigned_v<T>, "signed types are not supported");
   static_assert(base <= 16, "extend character map below to support higher bases");
   unsigned digits = 0;
   while (u) {

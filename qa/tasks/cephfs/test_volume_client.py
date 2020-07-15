@@ -1,23 +1,22 @@
 import json
 import logging
-import time
 import os
 from textwrap import dedent
 from tasks.cephfs.cephfs_test_case import CephFSTestCase
 from tasks.cephfs.fuse_mount import FuseMount
 from teuthology.exceptions import CommandFailedError
+from teuthology.misc import sudo_write_file
 
 log = logging.getLogger(__name__)
 
 
 class TestVolumeClient(CephFSTestCase):
-    #
-    # TODO: Test that VolumeClient can recover from partial auth updates.
-    #
-
     # One for looking at the global filesystem, one for being
     # the VolumeClient, two for mounting the created shares
     CLIENTS_REQUIRED = 4
+
+    def setUp(self):
+        CephFSTestCase.setUp(self)
 
     def _volume_client_python(self, client, script, vol_prefix=None, ns_prefix=None):
         # Can't dedent this *and* the script we pass in, because they might have different
@@ -27,7 +26,10 @@ class TestVolumeClient(CephFSTestCase):
         if ns_prefix:
             ns_prefix = "\"" + ns_prefix + "\""
         return client.run_python("""
+from __future__ import print_function
 from ceph_volume_client import CephFSVolumeClient, VolumePath
+from sys import version_info as sys_version_info
+from rados import OSError as rados_OSError
 import logging
 log = logging.getLogger("ceph_volume_client")
 log.addHandler(logging.StreamHandler())
@@ -36,28 +38,8 @@ vc = CephFSVolumeClient("manila", "{conf_path}", "ceph", {vol_prefix}, {ns_prefi
 vc.connect()
 {payload}
 vc.disconnect()
-        """.format(payload=script, conf_path=client.config_path, vol_prefix=vol_prefix, ns_prefix=ns_prefix))
-
-    def _sudo_write_file(self, remote, path, data):
-        """
-        Write data to a remote file as super user
-
-        :param remote: Remote site.
-        :param path: Path on the remote being written to.
-        :param data: Data to be written.
-
-        Both perms and owner are passed directly to chmod.
-        """
-        remote.run(
-            args=[
-                'sudo',
-                'python',
-                '-c',
-                'import shutil, sys; shutil.copyfileobj(sys.stdin, file(sys.argv[1], "wb"))',
-                path,
-            ],
-            stdin=data,
-        )
+        """.format(payload=script, conf_path=client.config_path,
+                   vol_prefix=vol_prefix, ns_prefix=ns_prefix))
 
     def _configure_vc_auth(self, mount, id_name):
         """
@@ -70,7 +52,7 @@ vc.disconnect()
             "mon", "allow *"
         )
         mount.client_id = id_name
-        self._sudo_write_file(mount.client_remote, mount.get_keyring_path(), out)
+        sudo_write_file(mount.client_remote, mount.get_keyring_path(), out)
         self.set_conf("client.{name}".format(name=id_name), "keyring", mount.get_keyring_path())
 
     def _configure_guest_auth(self, volumeclient_mount, guest_mount,
@@ -102,7 +84,7 @@ vc.disconnect()
             vp = VolumePath("{group_id}", "{volume_id}")
             auth_result = vc.authorize(vp, "{guest_entity}", readonly={readonly},
                                        tenant_id="{tenant_id}")
-            print auth_result['auth_key']
+            print(auth_result['auth_key'])
         """.format(
             group_id=group_id,
             volume_id=volume_id,
@@ -133,9 +115,8 @@ vc.disconnect()
             key=key
         ))
         guest_mount.client_id = guest_entity
-        self._sudo_write_file(guest_mount.client_remote,
-                              guest_mount.get_keyring_path(),
-                              keyring_txt)
+        sudo_write_file(guest_mount.client_remote,
+                        guest_mount.get_keyring_path(), keyring_txt)
 
         # Add a guest client section to the ceph config file.
         self.set_conf("client.{0}".format(guest_entity), "client quota", "True")
@@ -199,7 +180,7 @@ vc.disconnect()
         mount_path = self._volume_client_python(self.mount_b, dedent("""
             vp = VolumePath("{group_id}", "{volume_id}")
             create_result = vc.create_volume(vp, 1024*1024*{volume_size})
-            print create_result['mount_path']
+            print(create_result['mount_path'])
         """.format(
             group_id=group_id,
             volume_id=volume_id,
@@ -213,7 +194,7 @@ vc.disconnect()
         # the volume.
         self._configure_guest_auth(self.mount_b, self.mounts[2], guest_entity,
                                    mount_path, namespace_prefix)
-        self.mounts[2].mount(mount_path=mount_path)
+        self.mounts[2].mount_wait(mount_path=mount_path)
 
         # The kernel client doesn't have the quota-based df behaviour,
         # or quotas at all, so only exercise the client behaviour when
@@ -234,13 +215,16 @@ vc.disconnect()
 
             # Write something outside volume to check this space usage is
             # not reported in the volume's DF.
-            other_bin_mb = 6
+            other_bin_mb = 8
             self.mount_a.write_n_mb("other.bin", other_bin_mb)
 
             # global: df should see all the writes (data + other).  This is a >
             # rather than a == because the global spaced used includes all pools
-            self.assertGreater(self.mount_a.df()['used'],
-                               (data_bin_mb + other_bin_mb) * 1024 * 1024)
+            def check_df():
+                used = self.mount_a.df()['used']
+                return used >= (other_bin_mb * 1024 * 1024)
+
+            self.wait_until_true(check_df, timeout=30)
 
             # Hack: do a metadata IO to kick rstats
             self.mounts[2].run_shell(["touch", "foo"])
@@ -284,21 +268,21 @@ vc.disconnect()
             # it has lost network, because there is nothing to tell it that is messages
             # are being dropped because it's identity is gone)
             background = self.mounts[2].write_n_mb("rogue.bin", 1, wait=False)
-            time.sleep(10)  # Approximate check for 'stuck' as 'still running after 10s'
-            self.assertFalse(background.finished)
+            try:
+                background.wait()
+            except CommandFailedError:
+                # command failed with EBLACKLISTED?
+                if "transport endpoint shutdown" in background.stderr.getvalue():
+                    pass
+                else:
+                    raise
 
             # After deauthorisation, the client ID should be gone (this was the only
             # volume it was authorised for)
             self.assertNotIn("client.{0}".format(guest_entity), [e['entity'] for e in self.auth_list()])
 
             # Clean up the dead mount (ceph-fuse's behaviour here is a bit undefined)
-            self.mounts[2].kill()
-            self.mounts[2].kill_cleanup()
-            try:
-                background.wait()
-            except CommandFailedError:
-                # We killed the mount out from under you
-                pass
+            self.mounts[2].umount_wait()
 
         self._volume_client_python(self.mount_b, dedent("""
             vp = VolumePath("{group_id}", "{volume_id}")
@@ -344,6 +328,19 @@ vc.disconnect()
             vc.delete_volume(vp, data_isolated=True)
             vc.purge_volume(vp, data_isolated=True)
             vc.purge_volume(vp, data_isolated=True)
+
+            vc.create_volume(vp, 10, namespace_isolated=False)
+            vc.create_volume(vp, 10, namespace_isolated=False)
+            vc.authorize(vp, "{guest_entity}")
+            vc.authorize(vp, "{guest_entity}")
+            vc.deauthorize(vp, "{guest_entity}")
+            vc.deauthorize(vp, "{guest_entity}")
+            vc.evict("{guest_entity}")
+            vc.evict("{guest_entity}")
+            vc.delete_volume(vp)
+            vc.delete_volume(vp)
+            vc.purge_volume(vp)
+            vc.purge_volume(vp)
         """.format(
             group_id=group_id,
             volume_id=volume_id,
@@ -356,33 +353,8 @@ vc.disconnect()
         :return:
         """
 
-        # Because the teuthology config template sets mon_pg_warn_max_per_osd to
-        # 10000 (i.e. it just tries to ignore health warnings), reset it to something
-        # sane before using volume_client, to avoid creating pools with absurdly large
-        # numbers of PGs.
-        self.set_conf("global", "mon pg warn max per osd", "300")
-        for mon_daemon_state in self.ctx.daemons.iter_daemons_of_role('mon'):
-            mon_daemon_state.restart()
-
         self.mount_b.umount_wait()
         self._configure_vc_auth(self.mount_b, "manila")
-
-        # Calculate how many PGs we'll expect the new volume pool to have
-        osd_map = json.loads(self.fs.mon_manager.raw_cluster_cmd('osd', 'dump', '--format=json-pretty'))
-        max_per_osd = int(self.fs.get_config('mon_pg_warn_max_per_osd'))
-        osd_count = len(osd_map['osds'])
-        max_overall = osd_count * max_per_osd
-
-        existing_pg_count = 0
-        for p in osd_map['pools']:
-            existing_pg_count += p['pg_num']
-
-        expected_pg_num = (max_overall - existing_pg_count) / 10
-        log.info("max_per_osd {0}".format(max_per_osd))
-        log.info("osd_count {0}".format(osd_count))
-        log.info("max_overall {0}".format(max_overall))
-        log.info("existing_pg_count {0}".format(existing_pg_count))
-        log.info("expected_pg_num {0}".format(expected_pg_num))
 
         pools_a = json.loads(self.fs.mon_manager.raw_cluster_cmd("osd", "dump", "--format=json-pretty"))['pools']
 
@@ -390,7 +362,7 @@ vc.disconnect()
         volume_id = "volid"
         self._volume_client_python(self.mount_b, dedent("""
             vp = VolumePath("{group_id}", "{volume_id}")
-            vc.create_volume(vp, 10, data_isolated=True)
+            vc.create_volume(vp, data_isolated=True)
         """.format(
             group_id=group_id,
             volume_id=volume_id,
@@ -402,12 +374,6 @@ vc.disconnect()
         new_pools = set(p['pool_name'] for p in pools_b) - set([p['pool_name'] for p in pools_a])
         self.assertEqual(len(new_pools), 1)
 
-        # It should have followed the heuristic for PG count
-        # (this is an overly strict test condition, so we may want to remove
-        #  it at some point as/when the logic gets fancier)
-        created_pg_num = self.fs.mon_manager.get_pool_property(list(new_pools)[0], "pg_num")
-        self.assertEqual(expected_pg_num, created_pg_num)
-
     def test_15303(self):
         """
         Reproducer for #15303 "Client holds incorrect complete flag on dir
@@ -417,13 +383,13 @@ vc.disconnect()
             m.umount_wait()
 
         # Create a dir on mount A
-        self.mount_a.mount()
+        self.mount_a.mount_wait()
         self.mount_a.run_shell(["mkdir", "parent1"])
         self.mount_a.run_shell(["mkdir", "parent2"])
         self.mount_a.run_shell(["mkdir", "parent1/mydir"])
 
         # Put some files in it from mount B
-        self.mount_b.mount()
+        self.mount_b.mount_wait()
         self.mount_b.run_shell(["touch", "parent1/mydir/afile"])
         self.mount_b.umount_wait()
 
@@ -464,7 +430,7 @@ vc.disconnect()
                 self._volume_client_python(volumeclient_mount, dedent("""
                     vp = VolumePath("{group_id}", "{volume_id}")
                     create_result = vc.create_volume(vp, 10 * 1024 * 1024)
-                    print create_result['mount_path']
+                    print(create_result['mount_path'])
                 """.format(
                     group_id=group_id,
                     volume_id=volume_ids[i]
@@ -477,7 +443,7 @@ vc.disconnect()
             # Mount the volume.
             guest_mounts[i].mountpoint_dir_name = 'mnt.{id}.{suffix}'.format(
                 id=guest_entity, suffix=str(i))
-            guest_mounts[i].mount(mount_path=mount_paths[i])
+            guest_mounts[i].mount_wait(mount_path=mount_paths[i])
             guest_mounts[i].write_n_mb("data.bin", 1)
 
 
@@ -494,12 +460,17 @@ vc.disconnect()
         )))
 
         # Evicted guest client, guest_mounts[0], should not be able to do
-        # anymore metadata ops. It behaves as if it has lost network
-        # connection.
-        background = guest_mounts[0].write_n_mb("rogue.bin", 1, wait=False)
-        # Approximate check for 'stuck' as 'still running after 10s'.
-        time.sleep(10)
-        self.assertFalse(background.finished)
+        # anymore metadata ops.  It should start failing all operations
+        # when it sees that its own address is in the blacklist.
+        try:
+            guest_mounts[0].write_n_mb("rogue.bin", 1)
+        except CommandFailedError:
+            pass
+        else:
+            raise RuntimeError("post-eviction write should have failed!")
+
+        # The blacklisted guest client should now be unmountable
+        guest_mounts[0].umount_wait()
 
         # Guest client, guest_mounts[1], using the same auth ID 'guest', but
         # has mounted the other volume, should be able to use its volume
@@ -519,8 +490,6 @@ vc.disconnect()
                 guest_entity=guest_entity
             )))
 
-        # We must hard-umount the one that we evicted
-        guest_mounts[0].umount_wait(force=True)
 
     def test_purge(self):
         """
@@ -544,7 +513,7 @@ vc.disconnect()
         mount_path = self._volume_client_python(self.mount_b, dedent("""
             vp = VolumePath("{group_id}", u"{volume_id}")
             create_result = vc.create_volume(vp, 10)
-            print create_result['mount_path']
+            print(create_result['mount_path'])
         """.format(
             group_id=group_id,
             volume_id=volume_id
@@ -594,7 +563,7 @@ vc.disconnect()
         mount_path = self._volume_client_python(volumeclient_mount, dedent("""
             vp = VolumePath("{group_id}", "{volume_id}")
             create_result = vc.create_volume(vp, 1024*1024*10)
-            print create_result['mount_path']
+            print(create_result['mount_path'])
         """.format(
             group_id=group_id,
             volume_id=volume_id,
@@ -606,7 +575,7 @@ vc.disconnect()
                                    mount_path, readonly=False)
 
         # Mount the volume, and write to it.
-        guest_mount.mount(mount_path=mount_path)
+        guest_mount.mount_wait(mount_path=mount_path)
         guest_mount.write_n_mb("data.bin", 1)
 
         # Change the guest auth ID's authorization to read-only mount access.
@@ -625,13 +594,15 @@ vc.disconnect()
         # immediate. The guest sees the change only after a remount of
         # the volume.
         guest_mount.umount_wait()
-        guest_mount.mount(mount_path=mount_path)
+        guest_mount.mount_wait(mount_path=mount_path)
 
         # Read existing content of the volume.
         self.assertListEqual(guest_mount.ls(guest_mount.mountpoint), ["data.bin"])
         # Cannot write into read-only volume.
-        with self.assertRaises(CommandFailedError):
+        try:
             guest_mount.write_n_mb("rogue.bin", 1)
+        except CommandFailedError:
+            pass
 
     def test_get_authorized_ids(self):
         """
@@ -649,21 +620,20 @@ vc.disconnect()
         guest_entity_1 = "guest1"
         guest_entity_2 = "guest2"
 
-        log.info("print group ID: {0}".format(group_id))
+        log.info("print(group ID: {0})".format(group_id))
 
         # Create a volume.
         auths = self._volume_client_python(volumeclient_mount, dedent("""
             vp = VolumePath("{group_id}", "{volume_id}")
             vc.create_volume(vp, 1024*1024*10)
             auths = vc.get_authorized_ids(vp)
-            print auths
+            print(auths)
         """.format(
             group_id=group_id,
             volume_id=volume_id,
         )))
         # Check the list of authorized IDs for the volume.
-        expected_result = None
-        self.assertEqual(str(expected_result), auths)
+        self.assertEqual('None', auths)
 
         # Allow two auth IDs access to the volume.
         auths = self._volume_client_python(volumeclient_mount, dedent("""
@@ -671,7 +641,7 @@ vc.disconnect()
             vc.authorize(vp, "{guest_entity_1}", readonly=False)
             vc.authorize(vp, "{guest_entity_2}", readonly=True)
             auths = vc.get_authorized_ids(vp)
-            print auths
+            print(auths)
         """.format(
             group_id=group_id,
             volume_id=volume_id,
@@ -679,8 +649,8 @@ vc.disconnect()
             guest_entity_2=guest_entity_2,
         )))
         # Check the list of authorized IDs and their access levels.
-        expected_result = [(u'guest1', u'rw'), (u'guest2', u'r')]
-        self.assertItemsEqual(str(expected_result), auths)
+        expected_result = [('guest1', 'rw'), ('guest2', 'r')]
+        self.assertCountEqual(str(expected_result), auths)
 
         # Disallow both the auth IDs' access to the volume.
         auths = self._volume_client_python(volumeclient_mount, dedent("""
@@ -688,7 +658,7 @@ vc.disconnect()
             vc.deauthorize(vp, "{guest_entity_1}")
             vc.deauthorize(vp, "{guest_entity_2}")
             auths = vc.get_authorized_ids(vp)
-            print auths
+            print(auths)
         """.format(
             group_id=group_id,
             volume_id=volume_id,
@@ -696,8 +666,7 @@ vc.disconnect()
             guest_entity_2=guest_entity_2,
         )))
         # Check the list of authorized IDs for the volume.
-        expected_result = None
-        self.assertItemsEqual(str(expected_result), auths)
+        self.assertEqual('None', auths)
 
     def test_multitenant_volumes(self):
         """
@@ -762,52 +731,63 @@ vc.disconnect()
         # auth ID belongs to, the auth ID's authorized access levels
         # for different volumes, versioning details, etc.
         expected_auth_metadata = {
-            u"version": 1,
-            u"compat_version": 1,
-            u"dirty": False,
-            u"tenant_id": u"tenant1",
-            u"volumes": {
-                u"groupid/volumeid": {
-                    u"dirty": False,
-                    u"access_level": u"rw",
+            "version": 2,
+            "compat_version": 1,
+            "dirty": False,
+            "tenant_id": "tenant1",
+            "volumes": {
+                "groupid/volumeid": {
+                    "dirty": False,
+                    "access_level": "rw"
                 }
             }
         }
 
         auth_metadata = self._volume_client_python(volumeclient_mount, dedent("""
+            import json
             vp = VolumePath("{group_id}", "{volume_id}")
             auth_metadata = vc._auth_metadata_get("{auth_id}")
-            print auth_metadata
+            print(json.dumps(auth_metadata))
         """.format(
             group_id=group_id,
             volume_id=volume_id,
             auth_id=guestclient_1["auth_id"],
         )))
+        auth_metadata = json.loads(auth_metadata)
 
-        self.assertItemsEqual(str(expected_auth_metadata), auth_metadata)
+        self.assertGreaterEqual(auth_metadata["version"], expected_auth_metadata["version"])
+        del expected_auth_metadata["version"]
+        del auth_metadata["version"]
+        self.assertEqual(expected_auth_metadata, auth_metadata)
 
         # Verify that the volume metadata file stores info about auth IDs
         # and their access levels to the volume, versioning details, etc.
         expected_vol_metadata = {
-            u"version": 1,
-            u"compat_version": 1,
-            u"auths": {
-                u"guest": {
-                    u"dirty": False,
-                    u"access_level": u"rw"
+            "version": 2,
+            "compat_version": 1,
+            "auths": {
+                "guest": {
+                    "dirty": False,
+                    "access_level": "rw"
                 }
             }
         }
 
         vol_metadata = self._volume_client_python(volumeclient_mount, dedent("""
+            import json
             vp = VolumePath("{group_id}", "{volume_id}")
             volume_metadata = vc._volume_metadata_get(vp)
-            print volume_metadata
+            print(json.dumps(volume_metadata))
         """.format(
             group_id=group_id,
             volume_id=volume_id,
         )))
-        self.assertItemsEqual(str(expected_vol_metadata), vol_metadata)
+        vol_metadata = json.loads(vol_metadata)
+
+        self.assertGreaterEqual(vol_metadata["version"], expected_vol_metadata["version"])
+        del expected_vol_metadata["version"]
+        del vol_metadata["version"]
+        self.assertEqual(expected_vol_metadata, vol_metadata)
 
         # Cannot authorize 'guestclient_2' to access the volume.
         # It uses auth ID 'guest', which has already been used by a
@@ -903,3 +883,212 @@ vc.disconnect()
             volume_id=volume_id,
             auth_id=guestclient["auth_id"],
         )))
+
+    def test_put_object(self):
+        vc_mount = self.mounts[1]
+        vc_mount.umount_wait()
+        self._configure_vc_auth(vc_mount, "manila")
+
+        obj_data = 'test data'
+        obj_name = 'test_vc_obj_1'
+        pool_name = self.fs.get_data_pool_names()[0]
+
+        self._volume_client_python(vc_mount, dedent("""
+            vc.put_object("{pool_name}", "{obj_name}", b"{obj_data}")
+        """.format(
+            pool_name = pool_name,
+            obj_name = obj_name,
+            obj_data = obj_data
+        )))
+
+        read_data = self.fs.rados(['get', obj_name, '-'], pool=pool_name)
+        self.assertEqual(obj_data, read_data)
+
+    def test_get_object(self):
+        vc_mount = self.mounts[1]
+        vc_mount.umount_wait()
+        self._configure_vc_auth(vc_mount, "manila")
+
+        obj_data = 'test_data'
+        obj_name = 'test_vc_ob_2'
+        pool_name = self.fs.get_data_pool_names()[0]
+
+        self.fs.rados(['put', obj_name, '-'], pool=pool_name, stdin_data=obj_data)
+
+        self._volume_client_python(vc_mount, dedent("""
+            data_read = vc.get_object("{pool_name}", "{obj_name}")
+            assert data_read == b"{obj_data}"
+        """.format(
+            pool_name = pool_name,
+            obj_name = obj_name,
+            obj_data = obj_data
+        )))
+
+    def test_put_object_versioned(self):
+        vc_mount = self.mounts[1]
+        vc_mount.umount_wait()
+        self._configure_vc_auth(vc_mount, "manila")
+
+        obj_data = 'test_data'
+        obj_name = 'test_vc_obj'
+        pool_name = self.fs.get_data_pool_names()[0]
+        self.fs.rados(['put', obj_name, '-'], pool=pool_name, stdin_data=obj_data)
+
+        self._volume_client_python(vc_mount, dedent("""
+            data, version_before = vc.get_object_and_version("{pool_name}", "{obj_name}")
+
+            if sys_version_info.major < 3:
+                data = data + 'modification1'
+            elif sys_version_info.major > 3:
+                data = str.encode(data.decode() + 'modification1')
+
+            vc.put_object_versioned("{pool_name}", "{obj_name}", data, version_before)
+            data, version_after = vc.get_object_and_version("{pool_name}", "{obj_name}")
+            assert version_after == version_before + 1
+        """).format(pool_name=pool_name, obj_name=obj_name))
+
+    def test_version_check_for_put_object_versioned(self):
+        vc_mount = self.mounts[1]
+        vc_mount.umount_wait()
+        self._configure_vc_auth(vc_mount, "manila")
+
+        obj_data = 'test_data'
+        obj_name = 'test_vc_ob_2'
+        pool_name = self.fs.get_data_pool_names()[0]
+        self.fs.rados(['put', obj_name, '-'], pool=pool_name, stdin_data=obj_data)
+
+        # Test if put_object_versioned() crosschecks the version of the
+        # given object. Being a negative test, an exception is expected.
+        expected_exception = 'rados_OSError'
+        output = self._volume_client_python(vc_mount, dedent("""
+            data, version = vc.get_object_and_version("{pool_name}", "{obj_name}")
+
+            if sys_version_info.major < 3:
+                data = data + 'm1'
+            elif sys_version_info.major > 3:
+                data = str.encode(data.decode('utf-8') + 'm1')
+
+            vc.put_object("{pool_name}", "{obj_name}", data)
+
+            if sys_version_info.major < 3:
+                data = data + 'm2'
+            elif sys_version_info.major > 3:
+                data = str.encode(data.decode('utf-8') + 'm2')
+
+            try:
+                vc.put_object_versioned("{pool_name}", "{obj_name}", data, version)
+            except {expected_exception}:
+                print('{expected_exception} raised')
+        """).format(pool_name=pool_name, obj_name=obj_name,
+                    expected_exception=expected_exception))
+        self.assertEqual(expected_exception + ' raised', output)
+
+
+    def test_delete_object(self):
+        vc_mount = self.mounts[1]
+        vc_mount.umount_wait()
+        self._configure_vc_auth(vc_mount, "manila")
+
+        obj_data = 'test data'
+        obj_name = 'test_vc_obj_3'
+        pool_name = self.fs.get_data_pool_names()[0]
+
+        self.fs.rados(['put', obj_name, '-'], pool=pool_name, stdin_data=obj_data)
+
+        self._volume_client_python(vc_mount, dedent("""
+            data_read = vc.delete_object("{pool_name}", "{obj_name}")
+        """.format(
+            pool_name = pool_name,
+            obj_name = obj_name,
+        )))
+
+        with self.assertRaises(CommandFailedError):
+            self.fs.rados(['stat', obj_name], pool=pool_name)
+
+        # Check idempotency -- no error raised trying to delete non-existent
+        # object
+        self._volume_client_python(vc_mount, dedent("""
+            data_read = vc.delete_object("{pool_name}", "{obj_name}")
+        """.format(
+            pool_name = pool_name,
+            obj_name = obj_name,
+        )))
+
+    def test_21501(self):
+        """
+        Reproducer for #21501 "ceph_volume_client: sets invalid caps for
+        existing IDs with no caps" (http://tracker.ceph.com/issues/21501)
+        """
+
+        vc_mount = self.mounts[1]
+        vc_mount.umount_wait()
+
+        # Configure vc_mount as the handle for driving volumeclient
+        self._configure_vc_auth(vc_mount, "manila")
+
+        # Create a volume
+        group_id = "grpid"
+        volume_id = "volid"
+        mount_path = self._volume_client_python(vc_mount, dedent("""
+            vp = VolumePath("{group_id}", "{volume_id}")
+            create_result = vc.create_volume(vp, 1024*1024*10)
+            print(create_result['mount_path'])
+        """.format(
+            group_id=group_id,
+            volume_id=volume_id
+        )))
+
+        # Create an auth ID with no caps
+        guest_id = '21501'
+        self.fs.mon_manager.raw_cluster_cmd_result(
+            'auth', 'get-or-create', 'client.{0}'.format(guest_id))
+
+        guest_mount = self.mounts[2]
+        guest_mount.umount_wait()
+
+        # Set auth caps for the auth ID using the volumeclient
+        self._configure_guest_auth(vc_mount, guest_mount, guest_id, mount_path)
+
+        # Mount the volume in the guest using the auth ID to assert that the
+        # auth caps are valid
+        guest_mount.mount_wait(mount_path=mount_path)
+
+    def test_volume_without_namespace_isolation(self):
+        """
+        That volume client can create volumes that do not have separate RADOS
+        namespace layouts.
+        """
+        vc_mount = self.mounts[1]
+        vc_mount.umount_wait()
+
+        # Configure vc_mount as the handle for driving volumeclient
+        self._configure_vc_auth(vc_mount, "manila")
+
+        # Create a volume
+        volume_prefix = "/myprefix"
+        group_id = "grpid"
+        volume_id = "volid"
+        self._volume_client_python(vc_mount, dedent("""
+            vp = VolumePath("{group_id}", "{volume_id}")
+            create_result = vc.create_volume(vp, 1024*1024*10, namespace_isolated=False)
+            print(create_result['mount_path'])
+        """.format(
+            group_id=group_id,
+            volume_id=volume_id
+        )), volume_prefix)
+
+        # The CephFS volume should be created
+        self.mounts[0].stat(os.path.join("myprefix", group_id, volume_id))
+        vol_namespace = self.mounts[0].getfattr(
+            os.path.join("myprefix", group_id, volume_id),
+            "ceph.dir.layout.pool_namespace")
+        assert not vol_namespace
+
+        self._volume_client_python(vc_mount, dedent("""
+            vp = VolumePath("{group_id}", "{volume_id}")
+            vc.delete_volume(vp)
+            vc.purge_volume(vp)
+        """.format(
+            group_id=group_id,
+            volume_id=volume_id,
+        )), volume_prefix)

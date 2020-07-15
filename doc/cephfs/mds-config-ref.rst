@@ -2,29 +2,20 @@
  MDS Config Reference
 ======================
 
-``mon force standby active`` 
+``mds cache memory limit``
 
-:Description: If ``true`` monitors force standby-replay to be active. Set
-              under ``[mon]`` or ``[global]``.
-
-:Type: Boolean
-:Default: ``true`` 
-
-
-``mds max file size``
-
-:Description: The maximum allowed file size to set when creating a 
-              new file system.
-
+:Description: The memory limit the MDS should enforce for its cache.
 :Type:  64-bit Integer Unsigned
-:Default:  ``1ULL << 40``
+:Default: ``4G``
 
+``mds cache reservation``
 
-``mds cache size``
-
-:Description: The number of inodes to cache.
-:Type:  32-bit Integer
-:Default: ``100000``
+:Description: The cache reservation (memory or inodes) for the MDS cache to maintain.
+              Once the MDS begins dipping into its reservation, it will recall
+              client state until its cache size shrinks to restore the
+              reservation.
+:Type:  Float
+:Default: ``0.05``
 
 
 ``mds cache mid``
@@ -80,27 +71,14 @@
 
 ``mds blacklist interval``
 
-:Description: The blacklist duration for failed MDSs in the OSD map.
+:Description: The blacklist duration for failed MDSs in the OSD map. Note,
+              this controls how long failed MDS daemons will stay in the
+              OSDMap blacklist. It has no effect on how long something is
+              blacklisted when the administrator blacklists it manually. For
+              example, ``ceph osd blacklist add`` will still use the default
+              blacklist time.
 :Type:  Float
 :Default: ``24.0*60.0``
-
-
-``mds session timeout``
-
-:Description: The interval (in seconds) of client inactivity before Ceph 
-              times out capabilities and leases.
-              
-:Type:  Float
-:Default: ``60``
-
-
-``mds session autoclose``
-
-:Description: The interval (in seconds) before Ceph closes 
-              a laggy client's session.
-              
-:Type:  Float
-:Default: ``300``
 
 
 ``mds reconnect timeout``
@@ -150,27 +128,11 @@
 :Default: ``true``
 
 
-``mds use tmap``
-
-:Description: Use trivialmap for directory updates.
-:Type:  Boolean
-:Default: ``true``
-
-
 ``mds default dir hash``
 
 :Description: The function to use for hashing files across directory fragments.
 :Type:  32-bit Integer
 :Default: ``2`` (i.e., rjenkins)
-
-
-``mds log``
-
-:Description: Set to ``true`` if the MDS should journal metadata updates 
-              (disabled for benchmarking only).
-              
-:Type:  Boolean
-:Default: ``true``
 
 
 ``mds log skip corrupt events``
@@ -197,21 +159,7 @@
               we initiate trimming. Set to ``-1`` to disable limits.
 
 :Type:  32-bit Integer
-:Default: ``30``
-
-
-``mds log max expiring``
-
-:Description: The maximum number of segments to expire in parallels
-:Type:  32-bit Integer
-:Default: ``20``
-
-
-``mds log eopen size``
-
-:Description: The maximum number of inodes in an EOpen event.
-:Type:  32-bit Integer
-:Default: ``100``
+:Default: ``128``
 
 
 ``mds bal sample interval``
@@ -239,13 +187,6 @@
               
 :Type:  Float
 :Default: ``0``
-
-
-``mds bal frag``
-
-:Description: Determines whether the MDS will fragment directories.
-:Type:  Boolean
-:Default:  ``false``
 
 
 ``mds bal split size``
@@ -300,7 +241,7 @@
 
 ``mds bal fragment interval``
 
-:Description: The delay (in seconds) between a fragment being elegible for split
+:Description: The delay (in seconds) between a fragment being eligible for split
               or merge and executing the fragmentation change.
 :Type:  32-bit Integer
 :Default: ``5``
@@ -561,7 +502,7 @@
               (for testing only).
               
 :Type:  Boolean
-:Default: ``0``
+:Default: ``false``
 
 
 ``mds wipe ino prealloc``
@@ -570,7 +511,7 @@
               (for testing only).
               
 :Type:  Boolean
-:Default: ``0``
+:Default: ``false``
 
 
 ``mds skip ino``
@@ -582,26 +523,15 @@
 :Default: ``0``
 
 
-``mds standby for name``
+``mds min caps per client``
 
-:Description: An MDS daemon will standby for another MDS daemon of the name 
-              specified in this setting.
-
-:Type:  String
-:Default: N/A
+:Description: Set the minimum number of capabilities a client may hold.
+:Type: Integer
+:Default: ``100``
 
 
-``mds standby for rank``
+``mds max ratio caps per client``
 
-:Description: An MDS daemon will standby for an MDS daemon of this rank. 
-:Type:  32-bit Integer
-:Default: ``-1``
-
-
-``mds standby replay``
-
-:Description: Determines whether a ``ceph-mds`` daemon should poll and replay 
-              the log of an active MDS (hot standby).
-              
-:Type:  Boolean
-:Default:  ``false``
+:Description: Set the maximum ratio of current caps that may be recalled during MDS cache pressure.
+:Type: Float
+:Default: ``0.8``

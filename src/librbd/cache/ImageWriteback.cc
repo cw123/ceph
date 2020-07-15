@@ -4,10 +4,13 @@
 #include "ImageWriteback.h"
 #include "include/buffer.h"
 #include "common/dout.h"
-#include "librbd/AioCompletion.h"
-#include "librbd/AioImageRequest.h"
 #include "librbd/ImageCtx.h"
+#include "librbd/Utils.h"
+#include "librbd/io/AioCompletion.h"
+#include "librbd/io/ImageRequest.h"
+#include "librbd/io/ReadResult.h"
 
+#undef dout_subsys
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
 #define dout_prefix *_dout << "librbd::ImageWriteback: " << __func__ << ": "
@@ -26,11 +29,11 @@ void ImageWriteback<I>::aio_read(Extents &&image_extents, bufferlist *bl,
   ldout(cct, 20) << "image_extents=" << image_extents << ", "
                  << "on_finish=" << on_finish << dendl;
 
-  AioCompletion *aio_comp = AioCompletion::create_and_start(on_finish,
-                                                            &m_image_ctx,
-                                                            AIO_TYPE_READ);
-  AioImageRead<I> req(m_image_ctx, aio_comp, std::move(image_extents), nullptr,
-                      bl, fadvise_flags);
+  ImageCtx *image_ctx = util::get_image_ctx(&m_image_ctx);
+  auto aio_comp = io::AioCompletion::create_and_start(
+      on_finish, image_ctx, io::AIO_TYPE_READ);
+  io::ImageReadRequest<> req(*image_ctx, aio_comp, std::move(image_extents),
+                              io::ReadResult{bl}, fadvise_flags, {});
   req.set_bypass_image_cache();
   req.send();
 }
@@ -43,40 +46,84 @@ void ImageWriteback<I>::aio_write(Extents &&image_extents,
   ldout(cct, 20) << "image_extents=" << image_extents << ", "
                  << "on_finish=" << on_finish << dendl;
 
-  AioCompletion *aio_comp = AioCompletion::create_and_start(on_finish,
-                                                            &m_image_ctx,
-                                                            AIO_TYPE_WRITE);
-  AioImageWrite<I> req(m_image_ctx, aio_comp, std::move(image_extents),
-                       std::move(bl), fadvise_flags);
+  ImageCtx *image_ctx = util::get_image_ctx(&m_image_ctx);
+  auto aio_comp = io::AioCompletion::create_and_start(
+      on_finish, image_ctx, io::AIO_TYPE_WRITE);
+  io::ImageWriteRequest<> req(*image_ctx, aio_comp, std::move(image_extents),
+                               std::move(bl), fadvise_flags, {});
   req.set_bypass_image_cache();
   req.send();
 }
 
 template <typename I>
 void ImageWriteback<I>::aio_discard(uint64_t offset, uint64_t length,
+				    uint32_t discard_granularity_bytes,
                                     Context *on_finish) {
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 20) << "offset=" << offset << ", "
                  << "length=" << length << ", "
                 << "on_finish=" << on_finish << dendl;
 
-  AioCompletion *aio_comp = AioCompletion::create_and_start(on_finish,
-                                                            &m_image_ctx,
-                                                            AIO_TYPE_DISCARD);
-  AioImageDiscard<I> req(m_image_ctx, aio_comp, offset, length);
+  ImageCtx *image_ctx = util::get_image_ctx(&m_image_ctx);
+  auto aio_comp = io::AioCompletion::create_and_start(
+      on_finish, image_ctx, io::AIO_TYPE_DISCARD);
+  io::ImageDiscardRequest<> req(*image_ctx, aio_comp, {{offset, length}},
+                                 discard_granularity_bytes, {});
   req.set_bypass_image_cache();
   req.send();
 }
 
 template <typename I>
-void ImageWriteback<I>::aio_flush(Context *on_finish) {
+void ImageWriteback<I>::aio_flush(io::FlushSource flush_source, Context *on_finish) {
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 20) << "on_finish=" << on_finish << dendl;
 
-  AioCompletion *aio_comp = AioCompletion::create_and_start(on_finish,
-                                                            &m_image_ctx,
-                                                            AIO_TYPE_FLUSH);
-  AioImageFlush<I> req(m_image_ctx, aio_comp);
+  ImageCtx *image_ctx = util::get_image_ctx(&m_image_ctx);
+  auto aio_comp = io::AioCompletion::create_and_start(
+      on_finish, image_ctx, io::AIO_TYPE_FLUSH);
+  io::ImageFlushRequest<> req(*image_ctx, aio_comp, flush_source,
+                              {});
+  req.set_bypass_image_cache();
+  req.send();
+}
+
+template <typename I>
+void ImageWriteback<I>::aio_writesame(uint64_t offset, uint64_t length,
+                                      ceph::bufferlist&& bl,
+                                      int fadvise_flags, Context *on_finish) {
+  CephContext *cct = m_image_ctx.cct;
+  ldout(cct, 20) << "offset=" << offset << ", "
+                 << "length=" << length << ", "
+                 << "data_len=" << bl.length() << ", "
+                 << "on_finish=" << on_finish << dendl;
+
+  ImageCtx *image_ctx = util::get_image_ctx(&m_image_ctx);
+  auto aio_comp = io::AioCompletion::create_and_start(
+      on_finish, image_ctx, io::AIO_TYPE_WRITESAME);
+  io::ImageWriteSameRequest<> req(*image_ctx, aio_comp, {{offset, length}},
+                                   std::move(bl), fadvise_flags, {});
+  req.set_bypass_image_cache();
+  req.send();
+}
+
+template <typename I>
+void ImageWriteback<I>::aio_compare_and_write(Extents &&image_extents,
+                                              ceph::bufferlist&& cmp_bl,
+                                              ceph::bufferlist&& bl,
+                                              uint64_t *mismatch_offset,
+                                              int fadvise_flags,
+                                              Context *on_finish) {
+  CephContext *cct = m_image_ctx.cct;
+  ldout(cct, 20) << "image_extents=" << image_extents << ", "
+                 << "on_finish=" << on_finish << dendl;
+
+  ImageCtx *image_ctx = util::get_image_ctx(&m_image_ctx);
+  auto aio_comp = io::AioCompletion::create_and_start(
+      on_finish, image_ctx, io::AIO_TYPE_COMPARE_AND_WRITE);
+  io::ImageCompareAndWriteRequest<> req(*image_ctx, aio_comp,
+                                         std::move(image_extents),
+                                         std::move(cmp_bl), std::move(bl),
+                                         mismatch_offset, fadvise_flags, {});
   req.set_bypass_image_cache();
   req.send();
 }

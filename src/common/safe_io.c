@@ -12,15 +12,15 @@
  *
  */
 
+#include "common/safe_io.h"
+#include "include/compat.h"
+
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-
-#include "common/safe_io.h"
-#include "include/compat.h"
 
 ssize_t safe_read(int fd, void *buf, size_t count)
 {
@@ -153,7 +153,8 @@ ssize_t safe_splice_exact(int fd_in, off_t *off_in, int fd_out,
 #endif
 
 int safe_write_file(const char *base, const char *file,
-		    const char *val, size_t vallen)
+		    const char *val, size_t vallen,
+		    unsigned mode)
 {
   int ret;
   char fn[PATH_MAX];
@@ -168,7 +169,7 @@ int safe_write_file(const char *base, const char *file,
 
   snprintf(fn, sizeof(fn), "%s/%s", base, file);
   snprintf(tmp, sizeof(tmp), "%s/%s.tmp", base, file);
-  fd = open(tmp, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+  fd = open(tmp, O_WRONLY|O_CREAT|O_TRUNC, mode);
   if (fd < 0) {
     ret = errno;
     return -ret;

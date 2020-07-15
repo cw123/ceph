@@ -1,5 +1,6 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -83,35 +84,42 @@ namespace rgw {
 	     const std::string& _key)
       : type(_type), id(_id), key(_key) {};
 
-    RGWToken(const string& json) {
+    explicit RGWToken(const string& json) {
       JSONParser p;
       p.parse(json.c_str(), json.length());
       JSONDecoder::decode_json(RGWToken::type_name, *this, &p);
+    }
+
+    RGWToken& operator=(const std::string& json) {
+      JSONParser p;
+      p.parse(json.c_str(), json.length());
+      JSONDecoder::decode_json(RGWToken::type_name, *this, &p);
+      return *this;
     }
 
     void encode(bufferlist& bl) const {
       uint32_t ver = version();
       string typestr{from_type(type)};
       ENCODE_START(1, 1, bl);
-      ::encode(type_name, bl);
-      ::encode(ver, bl);
-      ::encode(typestr, bl);
-      ::encode(id, bl);
-      ::encode(key, bl);
+      encode(type_name, bl);
+      encode(ver, bl);
+      encode(typestr, bl);
+      encode(id, bl);
+      encode(key, bl);
       ENCODE_FINISH(bl);
     }
 
-    void decode(bufferlist::iterator& bl) {
+    void decode(bufferlist::const_iterator& bl) {
       string name;
       string typestr;
       uint32_t version;
       DECODE_START(1, bl);
-      ::decode(name, bl);
-      ::decode(version, bl);
-      ::decode(typestr, bl);
-      type = to_type(typestr.c_str());
-      ::decode(id, bl);
-      ::decode(key, bl);
+      decode(name, bl);
+      decode(version, bl);
+      decode(typestr, bl);
+      type = to_type(typestr);
+      decode(id, bl);
+      decode(key, bl);
       DECODE_FINISH(bl);
     }
 
@@ -135,7 +143,7 @@ namespace rgw {
       string typestr;
       JSONDecoder::decode_json("version", version, obj);
       JSONDecoder::decode_json("type", typestr, obj);
-      type = to_type(typestr.c_str());
+      type = to_type(typestr);
       JSONDecoder::decode_json("id", id, obj);
       JSONDecoder::decode_json("key", key, obj);
     }

@@ -1,5 +1,6 @@
 roles:
 - - mon.a
+  - mgr.x
   - osd.0
   - osd.1
   - osd.2
@@ -14,12 +15,17 @@ openstack:
 tasks:
 - install:
 - ceph:
+    pre-mgr-commands:
+      - sudo ceph config set mgr mgr/devicehealth/enable_monitoring false --force
     log-whitelist:
-    - wrongly marked me down
-    - slow request
+      - but it is still running
+      - slow request
+      - overall HEALTH_
+      - \(CACHE_POOL_
 - exec:
     client.0:
       - sudo ceph osd pool create base 4
+      - sudo ceph osd pool application enable base rados
       - sudo ceph osd pool create cache 4
       - sudo ceph osd tier add base cache
       - sudo ceph osd tier cache-mode cache writeback

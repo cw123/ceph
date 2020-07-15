@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 #include "common/errno.h"
 #include "common/Throttle.h"
@@ -24,12 +24,12 @@ void RGWFCGXProcess::run()
   int socket_backlog;
 
   conf->get_val("socket_path", "", &socket_path);
-  conf->get_val("socket_port", g_conf->rgw_port, &socket_port);
-  conf->get_val("socket_host", g_conf->rgw_host, &socket_host);
-  socket_backlog = g_conf->rgw_fcgi_socket_backlog;
+  conf->get_val("socket_port", g_conf()->rgw_port, &socket_port);
+  conf->get_val("socket_host", g_conf()->rgw_host, &socket_host);
+  socket_backlog = g_conf()->rgw_fcgi_socket_backlog;
 
   if (socket_path.empty() && socket_port.empty() && socket_host.empty()) {
-    socket_path = g_conf->rgw_socket_path;
+    socket_path = g_conf()->rgw_socket_path;
     if (socket_path.empty()) {
       dout(0) << "ERROR: no socket server point defined, cannot "
 	"start fcgi frontend" << dendl;
@@ -89,7 +89,7 @@ void RGWFCGXProcess::run()
   }
 
   for (;;) {
-    RGWFCGXRequest* req = new RGWFCGXRequest(store->get_new_req_id(), &qr);
+    RGWFCGXRequest* req = new RGWFCGXRequest(store->getRados()->get_new_req_id(), &qr);
     dout(10) << "allocated request req=" << hex << req << dec << dendl;
     req_throttle.get(1);
     int ret = FCGX_Accept_r(req->fcgx);
@@ -118,13 +118,15 @@ void RGWFCGXProcess::handle_request(RGWRequest* r)
 
   RGWFCGX fcgxfe(req->fcgx);
   auto real_client_io = rgw::io::add_reordering(
-                          rgw::io::add_buffering(
+                          rgw::io::add_buffering(cct,
                             rgw::io::add_chunking(
                               &fcgxfe)));
-  RGWRestfulIO client_io(&real_client_io);
+  RGWRestfulIO client_io(cct, &real_client_io);
 
  
-  int ret = process_request(store, rest, req, uri_prefix, &client_io, olog);
+  int ret = process_request(store, rest, req, uri_prefix,
+                            *auth_registry, &client_io, olog,
+                            null_yield, nullptr);
   if (ret < 0) {
     /* we don't really care about return code */
     dout(20) << "process_request() returned " << ret << dendl;

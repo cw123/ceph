@@ -1,4 +1,4 @@
-// -*- mode:C; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 
 #include "test/librbd/test_mock_fixture.h"
@@ -99,12 +99,15 @@ TEST_F(TestMockObjectMapSnapshotRollbackRequest, ReadMapError) {
   ASSERT_EQ(0, cond_ctx.wait());
 
   {
-    RWLock::RLocker snap_locker(ictx->snap_lock);
+    std::shared_lock image_locker{ictx->image_lock};
     uint64_t flags;
     ASSERT_EQ(0, ictx->get_flags(snap_id, &flags));
     ASSERT_NE(0U, flags & RBD_FLAG_OBJECT_MAP_INVALID);
   }
-  ASSERT_TRUE(ictx->test_flags(RBD_FLAG_OBJECT_MAP_INVALID));
+  bool flags_set;
+  ASSERT_EQ(0, ictx->test_flags(CEPH_NOSNAP,
+                                RBD_FLAG_OBJECT_MAP_INVALID, &flags_set));
+  ASSERT_TRUE(flags_set);
   expect_unlock_exclusive_lock(*ictx);
 }
 
@@ -128,12 +131,15 @@ TEST_F(TestMockObjectMapSnapshotRollbackRequest, WriteMapError) {
   ASSERT_EQ(0, cond_ctx.wait());
 
   {
-    RWLock::RLocker snap_locker(ictx->snap_lock);
+    std::shared_lock image_locker{ictx->image_lock};
     uint64_t flags;
     ASSERT_EQ(0, ictx->get_flags(snap_id, &flags));
     ASSERT_EQ(0U, flags & RBD_FLAG_OBJECT_MAP_INVALID);
   }
-  ASSERT_TRUE(ictx->test_flags(RBD_FLAG_OBJECT_MAP_INVALID));
+  bool flags_set;
+  ASSERT_EQ(0, ictx->test_flags(CEPH_NOSNAP,
+                                RBD_FLAG_OBJECT_MAP_INVALID, &flags_set));
+  ASSERT_TRUE(flags_set);
   expect_unlock_exclusive_lock(*ictx);
 }
 
